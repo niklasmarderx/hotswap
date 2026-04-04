@@ -14,7 +14,7 @@ if [ ! -d "$DEMO_DIR" ]; then
 fi
 
 # Wait for hotswap to start and be ready
-sleep 6
+sleep 10
 
 # --- Change 1: Update env vars (triggers env diff with masking) ---
 cat > "$DEMO_DIR/.env" << 'EOF'
