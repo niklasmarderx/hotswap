@@ -2,8 +2,10 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::config::{ReloadStrategy, SignalType, TargetConfig};
+use crate::config::{HooksConfig, ReloadStrategy, SignalType, TargetConfig};
+use crate::diff;
 use crate::env::{self, is_env_file, EnvMap};
+use crate::hooks;
 use crate::output::Output;
 use crate::process::{self, ProcessInfo};
 use crate::signal;
@@ -30,6 +32,9 @@ pub struct Target {
     pub health_check: Option<String>,
     pub health_timeout: Duration,
     pub depends_on: Vec<String>,
+    pub pre_signal: Option<String>,
+    pub post_signal: Option<String>,
+    pub enable_rollback: bool,
 }
 
 /// Options for a single reload cycle.
@@ -39,31 +44,54 @@ pub struct ReloadOptions<'a> {
     pub dry_run: bool,
     pub diff_only: bool,
     pub strategy: &'a ReloadStrategy,
+    pub hooks: Option<&'a HooksConfig>,
+    pub rollback: bool,
 }
 
-/// Env state tracked across reload cycles.
-pub struct EnvState {
-    pub snapshots: HashMap<String, EnvMap>,
+/// Diff state tracked across reload cycles — env files + structured config files.
+pub struct DiffState {
+    pub env_snapshots: HashMap<String, EnvMap>,
+    pub config_snapshots: HashMap<String, std::collections::BTreeMap<String, String>>,
 }
 
-impl EnvState {
-    pub fn new(env_files: &[String]) -> Self {
-        let mut snapshots = HashMap::new();
-        for file in env_files {
-            snapshots.insert(file.clone(), env::snapshot_env(file));
+impl DiffState {
+    pub fn new(watch_paths: &[String]) -> Self {
+        let mut env_snapshots = HashMap::new();
+        let mut config_snapshots = HashMap::new();
+        for file in watch_paths {
+            if is_env_file(file) {
+                env_snapshots.insert(file.clone(), env::snapshot_env(file));
+            } else if diff::is_config_file(file) {
+                config_snapshots.insert(file.clone(), diff::snapshot_config(file));
+            }
         }
-        Self { snapshots }
+        Self {
+            env_snapshots,
+            config_snapshots,
+        }
     }
 
-    pub fn update_and_diff(&mut self, file: &str) -> Option<env::EnvDiff> {
-        let old = self.snapshots.get(file).cloned().unwrap_or_default();
+    pub fn update_and_diff_env(&mut self, file: &str) -> Option<env::EnvDiff> {
+        let old = self.env_snapshots.get(file).cloned().unwrap_or_default();
         let new = env::snapshot_env(file);
-        self.snapshots.insert(file.to_string(), new.clone());
-        let diff = env::diff_env(&old, &new);
-        if diff.is_empty() {
+        self.env_snapshots.insert(file.to_string(), new.clone());
+        let d = env::diff_env(&old, &new);
+        if d.is_empty() {
             None
         } else {
-            Some(diff)
+            Some(d)
+        }
+    }
+
+    pub fn update_and_diff_config(&mut self, file: &str) -> Option<diff::ConfigDiff> {
+        let old = self.config_snapshots.get(file).cloned().unwrap_or_default();
+        let new = diff::snapshot_config(file);
+        self.config_snapshots.insert(file.to_string(), new.clone());
+        let d = diff::diff_config(&old, &new);
+        if d.is_empty() {
+            None
+        } else {
+            Some(d)
         }
     }
 }
@@ -88,6 +116,9 @@ pub fn resolve_targets(
                     health_check: None,
                     health_timeout: Duration::from_secs(5),
                     depends_on: Vec::new(),
+                    pre_signal: None,
+                    post_signal: None,
+                    enable_rollback: false,
                 });
             }
             Err(e) => {
@@ -113,6 +144,9 @@ pub fn resolve_targets(
                 health_check: None,
                 health_timeout: Duration::from_secs(5),
                 depends_on: Vec::new(),
+                pre_signal: None,
+                post_signal: None,
+                enable_rollback: false,
             });
         } else {
             for p in procs {
@@ -125,6 +159,9 @@ pub fn resolve_targets(
                     health_check: None,
                     health_timeout: Duration::from_secs(5),
                     depends_on: Vec::new(),
+                    pre_signal: None,
+                    post_signal: None,
+                    enable_rollback: false,
                 });
             }
         }
@@ -193,6 +230,9 @@ pub fn resolve_targets_from_config(targets: &[TargetConfig]) -> Result<Vec<Targe
             health_check: tc.health_check.clone(),
             health_timeout,
             depends_on: tc.depends_on.clone().unwrap_or_default(),
+            pre_signal: tc.pre_signal.clone(),
+            post_signal: tc.post_signal.clone(),
+            enable_rollback: tc.enable_rollback.unwrap_or(false),
         });
     }
 
@@ -309,6 +349,18 @@ fn signal_target(target: &mut Target, dry_run: bool) -> Result<()> {
     }
 
     if let Some(ref proc) = target.process {
+        // Run pre_signal hook
+        if let Some(ref cmd) = target.pre_signal {
+            if !dry_run {
+                hooks::run_hook(&format!("pre_signal[{}]", target.name), cmd, None)?;
+            } else {
+                Output::info(&format!(
+                    "would run pre_signal hook for {}: {}",
+                    target.name, cmd
+                ));
+            }
+        }
+
         if dry_run {
             Output::info(&format!(
                 "would send {} to {} (pid {})",
@@ -333,6 +385,11 @@ fn signal_target(target: &mut Target, dry_run: bool) -> Result<()> {
                 }
             }
         }
+
+        // Run post_signal hook
+        if let Some(ref cmd) = target.post_signal {
+            hooks::run_hook(&format!("post_signal[{}]", target.name), cmd, None)?;
+        }
     } else {
         Output::warn(&format!(
             "target '{}' — no running process, skipping signal",
@@ -342,10 +399,37 @@ fn signal_target(target: &mut Target, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run one reload cycle: validate, diff env, send signals.
+/// Backup of config files for rollback.
+struct ConfigBackup {
+    backups: HashMap<String, Vec<u8>>,
+}
+
+impl ConfigBackup {
+    fn capture(paths: &[String]) -> Result<Self> {
+        let mut backups = HashMap::new();
+        for path in paths {
+            if let Ok(content) = std::fs::read(path) {
+                backups.insert(path.clone(), content);
+            }
+        }
+        Ok(Self { backups })
+    }
+
+    fn restore(&self) -> Result<()> {
+        let files: Vec<String> = self.backups.keys().cloned().collect();
+        Output::rollback_restoring(&files);
+        for (path, content) in &self.backups {
+            std::fs::write(path, content)
+                .map_err(|e| anyhow::anyhow!("failed to restore {}: {}", path, e))?;
+        }
+        Ok(())
+    }
+}
+
+/// Run one reload cycle: validate, diff env/config, run hooks, send signals.
 pub fn reload(
     opts: &mut ReloadOptions,
-    env_state: &mut EnvState,
+    diff_state: &mut DiffState,
     changed_paths: &[String],
 ) -> Result<()> {
     // Step 1: Validate changed files (global validators from CLI)
@@ -357,6 +441,7 @@ pub fn reload(
                     Err(e) => {
                         Output::validation_failed(path, &e.to_string());
                         Output::error("reload aborted — fix validation errors first");
+                        run_on_error_hook(opts.hooks);
                         return Ok(());
                     }
                 }
@@ -375,6 +460,7 @@ pub fn reload(
                                 "reload aborted for {} — fix validation errors first",
                                 target.name
                             ));
+                            run_on_error_hook(opts.hooks);
                             return Ok(());
                         }
                     }
@@ -390,6 +476,7 @@ pub fn reload(
                     Err(e) => {
                         Output::validation_failed(path, &e.to_string());
                         Output::error("reload aborted — fix validation errors first");
+                        run_on_error_hook(opts.hooks);
                         return Ok(());
                     }
                 }
@@ -397,11 +484,15 @@ pub fn reload(
         }
     }
 
-    // Step 2: Show env diffs for .env files
+    // Step 2: Show diffs for env files and structured config files
     for path in changed_paths {
         if is_env_file(path) {
-            if let Some(diff) = env_state.update_and_diff(path) {
-                Output::env_diff(&diff.added, &diff.changed, &diff.removed);
+            if let Some(d) = diff_state.update_and_diff_env(path) {
+                Output::env_diff(&d.added, &d.changed, &d.removed);
+            }
+        } else if diff::is_config_file(path) {
+            if let Some(d) = diff_state.update_and_diff_config(path) {
+                Output::config_diff(path, &d);
             }
         }
     }
@@ -415,13 +506,85 @@ pub fn reload(
         Output::dry_run_header();
     }
 
-    // Step 4: Send signals based on strategy
-    match opts.strategy {
-        ReloadStrategy::Sequential => reload_sequential(opts.targets, opts.dry_run)?,
-        ReloadStrategy::Parallel => reload_parallel(opts.targets, opts.dry_run)?,
+    // Step 3.5: Capture backup for rollback if enabled
+    let rollback_enabled = opts.rollback || opts.targets.iter().any(|t| t.enable_rollback);
+    let backup = if rollback_enabled && !opts.dry_run {
+        Some(ConfigBackup::capture(changed_paths)?)
+    } else {
+        None
+    };
+
+    // Step 4: Run pre_reload hook
+    if let Some(hooks) = opts.hooks {
+        if let Some(ref cmd) = hooks.pre_reload {
+            if !opts.dry_run {
+                if let Err(e) = hooks::run_hook("pre_reload", cmd, None) {
+                    Output::error(&format!("pre_reload hook failed: {}", e));
+                    run_on_error_hook(opts.hooks);
+                    return Ok(());
+                }
+            } else {
+                Output::info(&format!("would run pre_reload hook: {}", cmd));
+            }
+        }
+    }
+
+    // Step 5: Send signals based on strategy
+    let signal_result = match opts.strategy {
+        ReloadStrategy::Sequential => reload_sequential(opts.targets, opts.dry_run),
+        ReloadStrategy::Parallel => reload_parallel(opts.targets, opts.dry_run),
+    };
+
+    // Step 5.5: Rollback on failure
+    if let Err(ref e) = signal_result {
+        if let Some(ref backup) = backup {
+            Output::rollback_start(&e.to_string());
+            match backup.restore() {
+                Ok(()) => {
+                    Output::rollback_ok();
+                    // Re-signal targets with restored config
+                    Output::info("re-signaling with restored config");
+                    let _ = match opts.strategy {
+                        ReloadStrategy::Sequential => reload_sequential(opts.targets, opts.dry_run),
+                        ReloadStrategy::Parallel => reload_parallel(opts.targets, opts.dry_run),
+                    };
+                }
+                Err(re) => {
+                    Output::rollback_failed(&re.to_string());
+                }
+            }
+            run_on_error_hook(opts.hooks);
+            return Ok(());
+        }
+        run_on_error_hook(opts.hooks);
+        return signal_result;
+    }
+
+    // Step 6: Run post_reload hook
+    if let Some(hooks) = opts.hooks {
+        if let Some(ref cmd) = hooks.post_reload {
+            if !opts.dry_run {
+                if let Err(e) = hooks::run_hook("post_reload", cmd, None) {
+                    Output::error(&format!("post_reload hook failed: {}", e));
+                }
+            } else {
+                Output::info(&format!("would run post_reload hook: {}", cmd));
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Run the on_error hook if configured.
+fn run_on_error_hook(hooks: Option<&HooksConfig>) {
+    if let Some(hooks) = hooks {
+        if let Some(ref cmd) = hooks.on_error {
+            if let Err(e) = hooks::run_hook("on_error", cmd, None) {
+                Output::error(&format!("on_error hook failed: {}", e));
+            }
+        }
+    }
 }
 
 /// Sequential reload: signal targets one by one in dependency order.
@@ -544,24 +707,27 @@ mod tests {
             health_check: None,
             health_timeout: Duration::from_secs(5),
             depends_on: depends_on.into_iter().map(String::from).collect(),
+            pre_signal: None,
+            post_signal: None,
+            enable_rollback: false,
         }
     }
 
     #[test]
-    fn env_state_new_and_diff() {
+    fn diff_state_new_and_diff() {
         let dir = tempfile::tempdir().unwrap();
         let env_path = dir.path().join(".env");
         std::fs::write(&env_path, "KEY=value\n").unwrap();
 
         let path_str = env_path.to_string_lossy().to_string();
-        let mut state = EnvState::new(&[path_str.clone()]);
+        let mut state = DiffState::new(&[path_str.clone()]);
 
         // No change yet
-        assert!(state.update_and_diff(&path_str).is_none());
+        assert!(state.update_and_diff_env(&path_str).is_none());
 
         // Modify the file
         std::fs::write(&env_path, "KEY=new_value\nADDED=yes\n").unwrap();
-        let diff = state.update_and_diff(&path_str).unwrap();
+        let diff = state.update_and_diff_env(&path_str).unwrap();
         assert_eq!(diff.changed.len(), 1);
         assert_eq!(diff.added.len(), 1);
     }
@@ -652,9 +818,11 @@ mod tests {
             dry_run: false,
             diff_only: true,
             strategy: &ReloadStrategy::Sequential,
+            hooks: None,
+            rollback: false,
         };
-        let mut env_state = EnvState::new(&[]);
-        let result = reload(&mut opts, &mut env_state, &[]);
+        let mut diff_state = DiffState::new(&[]);
+        let result = reload(&mut opts, &mut diff_state, &[]);
         assert!(result.is_ok());
     }
 
@@ -668,9 +836,11 @@ mod tests {
             dry_run: true,
             diff_only: false,
             strategy: &ReloadStrategy::Sequential,
+            hooks: None,
+            rollback: false,
         };
-        let mut env_state = EnvState::new(&[]);
-        let result = reload(&mut opts, &mut env_state, &[]);
+        let mut diff_state = DiffState::new(&[]);
+        let result = reload(&mut opts, &mut diff_state, &[]);
         assert!(result.is_ok());
     }
 }

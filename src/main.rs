@@ -1,6 +1,9 @@
 mod config;
 mod coordinator;
+mod diff;
 mod env;
+mod hooks;
+mod init;
 mod output;
 mod process;
 mod signal;
@@ -8,12 +11,11 @@ mod validate;
 mod watcher;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
-use config::{ReloadStrategy, SignalType};
-use coordinator::{EnvState, ReloadOptions};
-use env::is_env_file;
+use config::{HooksConfig, ReloadStrategy, SignalType};
+use coordinator::{DiffState, ReloadOptions};
 use output::Output;
 use validate::Validator;
 use watcher::WatchEvent;
@@ -25,8 +27,11 @@ use watcher::WatchEvent;
 #[derive(Parser, Debug)]
 #[command(name = "hotswap", version, about, long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Files or directories to watch (supports globs)
-    #[arg(short, long = "watch", required_unless_present_any = ["config", "completions"])]
+    #[arg(short, long = "watch")]
     watch_paths: Vec<String>,
 
     /// Process names to signal on change
@@ -84,10 +89,38 @@ struct Cli {
     /// Generate shell completions and exit
     #[arg(long, value_enum)]
     completions: Option<Shell>,
+
+    /// Command to run before reload
+    #[arg(long)]
+    pre_reload: Option<String>,
+
+    /// Command to run after reload
+    #[arg(long)]
+    post_reload: Option<String>,
+
+    /// Enable automatic rollback on health check failure
+    #[arg(long)]
+    rollback: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Generate a hotswap.toml config file by scanning for config files and processes
+    Init {
+        /// Output file path
+        #[arg(short, long, default_value = "hotswap.toml")]
+        output: String,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle subcommands first
+    if let Some(Commands::Init { output }) = &cli.command {
+        Output::banner();
+        return init::run_init(Some(output));
+    }
 
     // Handle completions generation
     if let Some(shell) = cli.completions {
@@ -137,43 +170,54 @@ fn main() -> Result<()> {
     });
 
     // Load config file or use CLI args
-    let (watch_paths, ignore_extra, debounce, mut targets, validators, resolved_strategy) =
-        if let Some(ref config_path) = cli.config {
-            let cfg = config::HotswapConfig::from_file(config_path)?;
+    let (
+        watch_paths,
+        ignore_extra,
+        debounce,
+        mut targets,
+        validators,
+        resolved_strategy,
+        hooks_config,
+    ) = if let Some(ref config_path) = cli.config {
+        let cfg = config::HotswapConfig::from_file(config_path)?;
 
-            let watch = cfg.watch.files;
-            let ignore = cfg.watch.ignore.unwrap_or_default();
-            let debounce = cfg.watch.debounce_ms.unwrap_or(cli.debounce);
-            let targets = coordinator::resolve_targets_from_config(&cfg.targets)?;
-            let strat = cfg.strategy.unwrap_or(strategy);
+        let watch = cfg.watch.files;
+        let ignore = cfg.watch.ignore.unwrap_or_default();
+        let debounce = cfg.watch.debounce_ms.unwrap_or(cli.debounce);
+        let targets = coordinator::resolve_targets_from_config(&cfg.targets)?;
+        let strat = cfg.strategy.unwrap_or(strategy);
+        let hooks = cfg.hooks.unwrap_or_default();
 
-            (watch, ignore, debounce, targets, Vec::new(), strat)
+        (watch, ignore, debounce, targets, Vec::new(), strat, hooks)
+    } else {
+        let targets = if cli.diff_only {
+            Vec::new()
         } else {
-            let targets = if cli.diff_only {
-                Vec::new()
-            } else {
-                coordinator::resolve_targets(
-                    &cli.signal_targets,
-                    &signal_type,
-                    cli.pid_file.as_deref(),
-                )
-            };
-
-            let validators: Vec<(String, Validator)> = cli
-                .validators
-                .iter()
-                .map(|v| (v.clone(), Validator::parse(v)))
-                .collect();
-
-            (
-                cli.watch_paths.clone(),
-                cli.ignore.clone(),
-                cli.debounce,
-                targets,
-                validators,
-                strategy,
-            )
+            coordinator::resolve_targets(&cli.signal_targets, &signal_type, cli.pid_file.as_deref())
         };
+
+        let validators: Vec<(String, Validator)> = cli
+            .validators
+            .iter()
+            .map(|v| (v.clone(), Validator::parse(v)))
+            .collect();
+
+        let hooks = HooksConfig {
+            pre_reload: cli.pre_reload.clone(),
+            post_reload: cli.post_reload.clone(),
+            on_error: None,
+        };
+
+        (
+            cli.watch_paths.clone(),
+            cli.ignore.clone(),
+            cli.debounce,
+            targets,
+            validators,
+            strategy,
+            hooks,
+        )
+    };
 
     if watch_paths.is_empty() {
         anyhow::bail!("no files to watch — specify --watch or --config");
@@ -186,15 +230,8 @@ fn main() -> Result<()> {
     // Display what we're watching
     Output::watching(&watch_paths);
 
-    // Identify env files for tracking diffs
-    let env_files: Vec<String> = watch_paths
-        .iter()
-        .filter(|p| is_env_file(p))
-        .cloned()
-        .collect();
-
-    // Initialize env state
-    let mut env_state = EnvState::new(&env_files);
+    // Initialize diff state (env files + config files)
+    let mut diff_state = DiffState::new(&watch_paths);
 
     // Start watching
     let (rx, shutdown_tx, _watcher) = watcher::start_watching(&watch_paths, debounce, &ignore)?;
@@ -226,9 +263,11 @@ fn main() -> Result<()> {
                     dry_run: cli.dry_run,
                     diff_only: cli.diff_only,
                     strategy: &resolved_strategy,
+                    hooks: Some(&hooks_config),
+                    rollback: cli.rollback,
                 };
 
-                if let Err(e) = coordinator::reload(&mut opts, &mut env_state, &changed) {
+                if let Err(e) = coordinator::reload(&mut opts, &mut diff_state, &changed) {
                     Output::error(&e.to_string());
                 }
 

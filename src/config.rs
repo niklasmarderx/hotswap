@@ -66,6 +66,9 @@ pub struct TargetConfig {
     pub health_check: Option<String>,
     pub health_timeout_ms: Option<u64>,
     pub depends_on: Option<Vec<String>>,
+    pub pre_signal: Option<String>,
+    pub post_signal: Option<String>,
+    pub enable_rollback: Option<bool>,
 }
 
 /// Watch section of hotswap.toml.
@@ -76,12 +79,21 @@ pub struct WatchConfig {
     pub debounce_ms: Option<u64>,
 }
 
+/// Global hooks configuration from hotswap.toml.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HooksConfig {
+    pub pre_reload: Option<String>,
+    pub post_reload: Option<String>,
+    pub on_error: Option<String>,
+}
+
 /// Root hotswap.toml config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HotswapConfig {
     pub watch: WatchConfig,
     pub targets: Vec<TargetConfig>,
     pub strategy: Option<ReloadStrategy>,
+    pub hooks: Option<HooksConfig>,
 }
 
 impl HotswapConfig {

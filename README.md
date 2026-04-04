@@ -59,9 +59,34 @@ Your app picks up the new config. No restart. No downtime. No drama.
     - REMOVED_VAR=goodbye
 ```
 
+**Config diffing** — TOML/JSON/YAML changes shown with dot-notation keys:
+```
+  diff config diff (config.toml):
+    + server.workers = 8
+    ~ server.port  3000 → 8080
+    - database.pool_timeout = 30
+```
+
+**Pre/Post hooks** — Run commands before and after reloads. Drain connections, notify Slack, warm caches:
+```bash
+hotswap --watch .env --signal myapp \
+  --pre-reload "echo draining" \
+  --post-reload "curl -X POST https://slack.com/webhook"
+```
+
+**Automatic rollback** — If a health check fails after signaling, hotswap restores the old config and re-signals:
+```bash
+hotswap --watch .env --signal myapp --rollback
+```
+
 **Multi-process coordination** — Reload backend → wait for health check → reload frontend → reload workers. Sequential or parallel. With dependency ordering.
 
 **Health checks** — `curl -sf http://localhost:3000/health` between reloads. If it fails, stop. Don't cascade failures.
+
+**`hotswap init`** — Auto-generate a `hotswap.toml` by scanning your project for config files and running processes:
+```bash
+hotswap init
+```
 
 **Dry run** — See exactly what would happen without doing it.
 
@@ -93,6 +118,15 @@ hotswap --watch .env --diff-only
 
 # What would happen? (without actually doing it)
 hotswap --watch .env --signal myapp --dry-run
+
+# Auto-generate a config file
+hotswap init
+
+# Run with hooks and rollback
+hotswap --watch .env --signal myapp \
+  --pre-reload "drain-connections.sh" \
+  --post-reload "warmup-cache.sh" \
+  --rollback
 ```
 
 ## Real-World Examples
@@ -159,7 +193,7 @@ hotswap --watch .env --signal myapp --json
 
 ## Config File
 
-For complex setups, use `hotswap.toml`:
+For complex setups, use `hotswap.toml` (generate one with `hotswap init`):
 
 ```toml
 # Reload strategy: "sequential" (default) or "parallel"
@@ -170,6 +204,11 @@ files = [".env", "config/*.toml"]
 ignore = ["*.tmp", "*.bak"]
 debounce_ms = 500
 
+[hooks]
+pre_reload = "echo 'starting reload'"
+post_reload = "curl -X POST https://slack.com/webhook -d 'reload done'"
+on_error = "curl -X POST https://slack.com/webhook -d 'reload FAILED'"
+
 [[targets]]
 name = "backend"
 signal = "SIGHUP"              # Signal to send (SIGHUP, SIGUSR1, SIGUSR2, SIGTERM)
@@ -177,6 +216,9 @@ pid_file = "/tmp/backend.pid"  # Find process by PID file
 validate = "toml"              # Validate before signaling
 health_check = "curl -sf http://localhost:3000/health"
 health_timeout_ms = 5000       # Health check timeout (default: 5000ms)
+enable_rollback = true         # Restore config + re-signal on health check failure
+pre_signal = "drain-connections.sh"   # Run before sending signal
+post_signal = "warmup-cache.sh"       # Run after health check passes
 
 [[targets]]
 name = "frontend"
@@ -190,7 +232,11 @@ See [examples/hotswap.toml](examples/hotswap.toml) for a full annotated example.
 ## CLI Reference
 
 ```
-Usage: hotswap [OPTIONS]
+Usage: hotswap [OPTIONS] [COMMAND]
+
+Commands:
+  init  Generate a hotswap.toml config file
+  help  Print this message or the help of the given subcommand(s)
 
 Options:
   -w, --watch <WATCH_PATHS>        Files or directories to watch (supports globs)
@@ -207,6 +253,9 @@ Options:
       --strategy <STRATEGY>        Reload strategy: sequential or parallel [default: sequential]
       --json                       Output as JSON (structured logging)
       --completions <COMPLETIONS>  Generate shell completions (bash, zsh, fish, elvish, powershell)
+      --pre-reload <PRE_RELOAD>    Command to run before reload
+      --post-reload <POST_RELOAD>  Command to run after reload
+      --rollback                   Enable automatic rollback on health check failure
   -h, --help                       Print help
   -V, --version                    Print version
 ```
@@ -217,20 +266,22 @@ Options:
   .env changed
        │
        ▼
-  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌─────────┐
-  │  Watch  │────▶│ Validate │────▶│   Diff   │────▶│  Signal │
-  │ (notify)│     │ (syntax) │     │  (.env)  │     │ (kill)  │
-  └─────────┘     └──────────┘     └──────────┘     └─────────┘
-                       │                                  │
-                  Invalid?                           Health check
-                  Don't signal.                      before next.
+  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌─────────┐
+  │  Watch  │────▶│ Validate │────▶│   Diff   │────▶│  Hooks   │────▶│  Signal │
+  │ (notify)│     │ (syntax) │     │(env+conf)│     │(pre/post)│     │ (kill)  │
+  └─────────┘     └──────────┘     └──────────┘     └──────────┘     └─────────┘
+                       │                                                  │
+                  Invalid?                                           Health check
+                  Don't signal.                                      failed? Rollback.
 ```
 
 1. **Watch** — OS-native file watching (FSEvents/inotify) with debounce
 2. **Validate** — Syntax check (TOML/JSON/YAML) or custom commands. Invalid = abort.
-3. **Diff** — Parse `.env` files, compute and display changes
-4. **Signal** — Send Unix signal to process. Sequential or parallel with dependency ordering.
-5. **Health Check** — Verify process is healthy before continuing to next target.
+3. **Diff** — Parse `.env` files AND structured configs (TOML/JSON/YAML), compute and display changes with dot-notation keys
+4. **Hooks** — Run `pre_reload` / `pre_signal` commands (drain connections, notify, etc.)
+5. **Signal** — Send Unix signal to process. Sequential or parallel with dependency ordering.
+6. **Health Check** — Verify process is healthy. If failed and `--rollback` enabled, restore old config and re-signal.
+7. **Post Hooks** — Run `post_signal` / `post_reload` commands (warmup, notify, etc.)
 
 ## Comparison
 
@@ -240,9 +291,13 @@ Options:
 | Signal running processes | **Yes** | No (re-runs) | No (re-runs) | No (restarts) | No |
 | Config validation | **Yes** | No | No | No | No |
 | Env diffing | **Yes** | No | No | No | No |
+| Config diffing (TOML/JSON/YAML) | **Yes** | No | No | No | No |
+| Pre/post hooks | **Yes** | No | No | No | No |
+| Auto rollback | **Yes** | No | No | No | No |
 | Multi-process coordination | **Yes** | No | No | No | No |
 | Health checks | **Yes** | No | No | No | No |
 | Zero downtime | **Yes** | No | No | No | N/A |
+| Config generator (`init`) | **Yes** | No | No | No | No |
 | Single binary | **Yes** | Yes | Yes | No (Node) | Yes |
 
 ## Shell Completions

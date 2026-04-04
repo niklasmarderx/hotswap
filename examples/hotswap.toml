@@ -1,6 +1,7 @@
 # hotswap.toml — Example configuration
 #
 # Run with: hotswap --config hotswap.toml
+# Generate with: hotswap init
 #
 # This config watches .env and config files, validates configs before
 # reloading, and signals processes in dependency order with health checks.
@@ -20,6 +21,12 @@ ignore = ["*.tmp", "*.bak"]
 # Debounce interval in milliseconds (default: 500)
 debounce_ms = 500
 
+# Global hooks — run shell commands at lifecycle points
+[hooks]
+pre_reload = "echo 'starting reload'"
+post_reload = "echo 'reload complete'"
+on_error = "echo 'reload failed'"
+
 # Target: API server (reloaded first)
 [[targets]]
 name = "api-server"
@@ -28,6 +35,9 @@ pid_file = "/tmp/api-server.pid"
 validate = "toml"
 health_check = "curl -sf http://localhost:3000/health"
 health_timeout_ms = 5000
+enable_rollback = true
+pre_signal = "echo 'draining api connections'"
+post_signal = "echo 'api warmup done'"
 
 # Target: Worker (depends on api-server, reloaded second)
 [[targets]]

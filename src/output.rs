@@ -2,6 +2,8 @@ use colored::Colorize;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::diff::ConfigDiff;
+
 static JSON_MODE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_json_mode(enabled: bool) {
@@ -210,6 +212,60 @@ impl Output {
         }
     }
 
+    pub fn config_diff(path: &str, diff: &ConfigDiff) {
+        if diff.is_empty() {
+            return;
+        }
+
+        if is_json() {
+            let changed_json: serde_json::Map<String, serde_json::Value> = diff
+                .changed
+                .iter()
+                .map(|(k, (o, n))| (k.clone(), serde_json::json!({"old": o, "new": n})))
+                .collect();
+            json_event(
+                "config_diff",
+                serde_json::json!({
+                    "path": path,
+                    "added": diff.added,
+                    "changed": changed_json,
+                    "removed": diff.removed
+                }),
+            );
+            return;
+        }
+
+        eprintln!(
+            "  {} config diff ({}):",
+            "diff".cyan().bold(),
+            path.dimmed()
+        );
+
+        for (key, value) in &diff.added {
+            eprintln!(
+                "    {} {} = {}",
+                "+".green().bold(),
+                key.green(),
+                value.green()
+            );
+        }
+
+        for (key, (old, new)) in &diff.changed {
+            eprintln!(
+                "    {} {}  {} {} {}",
+                "~".yellow().bold(),
+                key.yellow(),
+                old.dimmed().strikethrough(),
+                "→".dimmed(),
+                new.yellow()
+            );
+        }
+
+        for (key, value) in &diff.removed {
+            eprintln!("    {} {} = {}", "-".red().bold(), key.red(), value.red());
+        }
+    }
+
     pub fn error(msg: &str) {
         if is_json() {
             json_event("error", serde_json::json!({ "message": msg }));
@@ -274,6 +330,93 @@ impl Output {
             "  {} {} — {}",
             "health".red().bold(),
             target.white(),
+            error.red()
+        );
+    }
+
+    pub fn hook_start(name: &str, command: &str) {
+        if is_json() {
+            json_event(
+                "hook_start",
+                serde_json::json!({ "name": name, "command": command }),
+            );
+            return;
+        }
+        eprintln!(
+            "  {} {} ({})",
+            "hook".magenta().bold(),
+            name.white(),
+            command.dimmed()
+        );
+    }
+
+    pub fn hook_ok(name: &str) {
+        if is_json() {
+            json_event("hook_ok", serde_json::json!({ "name": name }));
+            return;
+        }
+        eprintln!("  {} {} completed", "hook".green().bold(), name.white());
+    }
+
+    pub fn hook_failed(name: &str, error: &str) {
+        if is_json() {
+            json_event(
+                "hook_failed",
+                serde_json::json!({ "name": name, "error": error }),
+            );
+            return;
+        }
+        eprintln!(
+            "  {} {} — {}",
+            "hook".red().bold(),
+            name.white(),
+            error.red()
+        );
+    }
+
+    pub fn rollback_start(reason: &str) {
+        if is_json() {
+            json_event("rollback_start", serde_json::json!({ "reason": reason }));
+            return;
+        }
+        eprintln!(
+            "\n  {} rolling back — {}",
+            "rollback".yellow().bold(),
+            reason
+        );
+    }
+
+    pub fn rollback_restoring(files: &[String]) {
+        if is_json() {
+            json_event("rollback_restoring", serde_json::json!({ "files": files }));
+            return;
+        }
+        eprintln!(
+            "  {} restoring {}",
+            "rollback".yellow().bold(),
+            files.join(", ")
+        );
+    }
+
+    pub fn rollback_ok() {
+        if is_json() {
+            json_event("rollback_ok", serde_json::json!({}));
+            return;
+        }
+        eprintln!(
+            "  {} config restored successfully",
+            "rollback".green().bold()
+        );
+    }
+
+    pub fn rollback_failed(error: &str) {
+        if is_json() {
+            json_event("rollback_failed", serde_json::json!({ "error": error }));
+            return;
+        }
+        eprintln!(
+            "  {} restore failed — {}",
+            "rollback".red().bold(),
             error.red()
         );
     }

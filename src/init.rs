@@ -1,0 +1,264 @@
+use anyhow::Result;
+use std::path::Path;
+use sysinfo::System;
+
+use crate::output::Output;
+
+/// Well-known process names that are commonly signaled for config reload.
+const KNOWN_PROCESSES: &[&str] = &[
+    "nginx",
+    "node",
+    "python",
+    "python3",
+    "ruby",
+    "java",
+    "postgres",
+    "redis-server",
+    "redis",
+    "mongod",
+    "gunicorn",
+    "uvicorn",
+    "caddy",
+    "haproxy",
+    "apache2",
+    "httpd",
+    "php-fpm",
+    "supervisord",
+    "pm2",
+    "deno",
+    "bun",
+];
+
+/// Run the `hotswap init` command — generate a hotswap.toml config file.
+pub fn run_init(output_path: Option<&str>) -> Result<()> {
+    let output = output_path.unwrap_or("hotswap.toml");
+
+    if Path::new(output).exists() {
+        anyhow::bail!(
+            "{} already exists — remove it first or use --output to specify a different path",
+            output
+        );
+    }
+
+    Output::info("scanning for config files...");
+
+    // Scan for config files
+    let config_files = scan_config_files();
+    for f in &config_files {
+        Output::info(&format!("found {}", f));
+    }
+
+    // Scan for running processes
+    Output::info("scanning for running processes...");
+    let processes = scan_processes();
+    for (name, pid) in &processes {
+        Output::process_found(name, *pid);
+    }
+
+    if config_files.is_empty() && processes.is_empty() {
+        Output::warn("no config files or known processes found");
+        Output::info("generating a minimal hotswap.toml template");
+    }
+
+    // Generate config
+    let toml = generate_config(&config_files, &processes);
+    std::fs::write(output, &toml)?;
+
+    eprintln!();
+    Output::info(&format!("generated {} with:", output));
+    Output::info(&format!(
+        "  {} watch path{}",
+        config_files.len().max(1),
+        if config_files.len() == 1 { "" } else { "s" }
+    ));
+    Output::info(&format!(
+        "  {} target{}",
+        processes.len().max(1),
+        if processes.len() == 1 { "" } else { "s" }
+    ));
+    eprintln!();
+    Output::info(&format!("edit {}, then run:", output));
+    Output::info(&format!("  hotswap --config {}", output));
+
+    Ok(())
+}
+
+/// Scan the current directory for common config files.
+fn scan_config_files() -> Vec<String> {
+    let mut found = Vec::new();
+
+    // Check for common env files
+    let env_patterns = [".env", ".env.local", ".env.production", ".env.development"];
+    for pattern in &env_patterns {
+        if Path::new(pattern).exists() {
+            found.push(pattern.to_string());
+        }
+    }
+
+    // Check for common config files
+    let config_patterns = [
+        "config.toml",
+        "config.json",
+        "config.yaml",
+        "config.yml",
+        "app.toml",
+        "app.json",
+        "app.yaml",
+        "settings.toml",
+        "settings.json",
+        "settings.yaml",
+    ];
+    for pattern in &config_patterns {
+        if Path::new(pattern).exists() {
+            found.push(pattern.to_string());
+        }
+    }
+
+    // Scan config/ directory
+    if Path::new("config").is_dir() {
+        for ext in &["toml", "json", "yaml", "yml"] {
+            let glob_pattern = format!("config/*.{}", ext);
+            if let Ok(entries) = glob::glob(&glob_pattern) {
+                for entry in entries.flatten() {
+                    let path = entry.to_string_lossy().to_string();
+                    if !found.contains(&path) {
+                        found.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Scan etc/ directory
+    if Path::new("etc").is_dir() {
+        for ext in &["toml", "json", "yaml", "yml", "conf"] {
+            let glob_pattern = format!("etc/*.{}", ext);
+            if let Ok(entries) = glob::glob(&glob_pattern) {
+                for entry in entries.flatten() {
+                    let path = entry.to_string_lossy().to_string();
+                    if !found.contains(&path) {
+                        found.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    found
+}
+
+/// Scan for known running processes.
+fn scan_processes() -> Vec<(String, u32)> {
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    let mut found: Vec<(String, u32)> = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    for process in sys.processes().values() {
+        let name = process.name().to_string_lossy().to_lowercase();
+        for &known in KNOWN_PROCESSES {
+            if (name == known || name.starts_with(&format!("{}-", known)))
+                && seen_names.insert(known.to_string())
+            {
+                found.push((known.to_string(), process.pid().as_u32()));
+            }
+        }
+    }
+
+    found
+}
+
+/// Generate a hotswap.toml config string.
+fn generate_config(config_files: &[String], processes: &[(String, u32)]) -> String {
+    let mut out = String::new();
+
+    out.push_str("# Generated by `hotswap init`\n");
+    out.push_str("# Edit this file to match your setup, then run:\n");
+    out.push_str("#   hotswap --config hotswap.toml\n\n");
+
+    out.push_str("strategy = \"sequential\"\n\n");
+
+    // Watch section
+    out.push_str("[watch]\n");
+    if config_files.is_empty() {
+        out.push_str("files = [\".env\"]  # add your config files here\n");
+    } else {
+        out.push_str("files = [");
+        for (i, f) in config_files.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{}\"", f));
+        }
+        out.push_str("]\n");
+    }
+    out.push_str("ignore = [\"*.tmp\", \"*.bak\"]\n");
+    out.push_str("debounce_ms = 500\n\n");
+
+    // Hooks section
+    out.push_str("# [hooks]\n");
+    out.push_str("# pre_reload = \"echo 'starting reload'\"\n");
+    out.push_str("# post_reload = \"echo 'reload complete'\"\n");
+    out.push_str("# on_error = \"echo 'reload failed'\"\n\n");
+
+    // Targets
+    if processes.is_empty() {
+        out.push_str("# [[targets]]\n");
+        out.push_str("# name = \"myapp\"\n");
+        out.push_str("# signal = \"SIGHUP\"\n");
+        out.push_str("# process_name = \"myapp\"\n");
+        out.push_str("# health_check = \"curl -sf http://localhost:3000/health\"\n");
+        out.push_str("# health_timeout_ms = 5000\n");
+        out.push_str("# enable_rollback = true\n");
+    } else {
+        for (i, (name, _pid)) in processes.iter().enumerate() {
+            out.push_str("[[targets]]\n");
+            out.push_str(&format!("name = \"{}\"\n", name));
+            out.push_str("signal = \"SIGHUP\"\n");
+            out.push_str(&format!("process_name = \"{}\"\n", name));
+            out.push_str(&format!(
+                "# health_check = \"curl -sf http://localhost:{}/health\"\n",
+                3000 + i
+            ));
+            out.push_str("# health_timeout_ms = 5000\n");
+            out.push_str("# enable_rollback = true\n");
+            if i > 0 {
+                out.push_str(&format!("# depends_on = [\"{}\"]\n", processes[0].0));
+            }
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_config_empty() {
+        let config = generate_config(&[], &[]);
+        assert!(config.contains("strategy = \"sequential\""));
+        assert!(config.contains("[watch]"));
+        assert!(config.contains("# [[targets]]"));
+    }
+
+    #[test]
+    fn generate_config_with_files() {
+        let files = vec![".env".to_string(), "config.toml".to_string()];
+        let config = generate_config(&files, &[]);
+        assert!(config.contains("\".env\""));
+        assert!(config.contains("\"config.toml\""));
+    }
+
+    #[test]
+    fn generate_config_with_processes() {
+        let procs = vec![("nginx".to_string(), 1234), ("node".to_string(), 5678)];
+        let config = generate_config(&[], &procs);
+        assert!(config.contains("name = \"nginx\""));
+        assert!(config.contains("name = \"node\""));
+        assert!(config.contains("# depends_on = [\"nginx\"]"));
+    }
+}
