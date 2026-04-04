@@ -66,9 +66,13 @@ pub fn start_watching(
 
     for path_str in paths {
         // Expand glob patterns
-        let matched: Vec<PathBuf> = glob::glob(path_str)
-            .map(|entries| entries.filter_map(|e| e.ok()).collect())
-            .unwrap_or_default();
+        let matched: Vec<PathBuf> = match glob::glob(path_str) {
+            Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+            Err(e) => {
+                Output::warn(&format!("invalid watch pattern '{}': {}", path_str, e));
+                Vec::new()
+            }
+        };
 
         if matched.is_empty() {
             if is_glob_pattern(path_str) {

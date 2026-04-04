@@ -5,6 +5,11 @@ files = [".env", "config.toml"]
 ignore = ["*.tmp"]
 debounce_ms = 300
 
+[hooks]
+pre_reload = "echo pre"
+post_reload = "echo post"
+on_error = "echo error"
+
 [[targets]]
 name = "backend"
 signal = "SIGHUP"
@@ -12,6 +17,9 @@ pid_file = "/tmp/backend.pid"
 validate = "toml"
 health_check = "curl -sf http://localhost:3000/health"
 health_timeout_ms = 5000
+pre_signal = "echo draining"
+post_signal = "echo warmed"
+enable_rollback = true
 
 [[targets]]
 name = "frontend"

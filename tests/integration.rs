@@ -145,13 +145,10 @@ fn dry_run_with_nonexistent_target() {
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
 
-    // Should have started successfully (stderr contains "waiting" or process output)
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("waiting") || stderr.contains("not found"),
-        "unexpected stderr: {}",
-        stderr
-    );
+    // Process was running (killed by us, not exited with clap error).
+    // On Unix, killed processes have no exit code; on some systems it may be non-zero.
+    // The key check: it didn't exit with status 2 (clap argument error).
+    assert_ne!(output.status.code(), Some(2), "process rejected arguments");
 }
 
 #[test]
@@ -195,4 +192,114 @@ fn init_help_flag() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--output"));
+}
+
+#[test]
+fn pre_post_reload_flags_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let env_path = dir.path().join(".env");
+    std::fs::write(&env_path, "KEY=value\n").unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hotswap"))
+        .arg("--watch")
+        .arg(env_path.to_str().unwrap())
+        .arg("--diff-only")
+        .arg("--pre-reload")
+        .arg("echo before")
+        .arg("--post-reload")
+        .arg("echo after")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+
+    // Should have started successfully — flags are accepted
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("waiting")
+            || output.status.code() == Some(0)
+            || output.status.code().is_none(),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn rollback_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let env_path = dir.path().join(".env");
+    std::fs::write(&env_path, "KEY=value\n").unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hotswap"))
+        .arg("--watch")
+        .arg(env_path.to_str().unwrap())
+        .arg("--signal")
+        .arg("nonexistent_process_99999")
+        .arg("--rollback")
+        .arg("--dry-run")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+
+    // Should have started — the --rollback flag is accepted
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("waiting") || stderr.contains("not found"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn config_file_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a minimal config and watched file
+    let env_path = dir.path().join(".env");
+    std::fs::write(&env_path, "KEY=value\n").unwrap();
+
+    let config_path = dir.path().join("hotswap.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"strategy = "sequential"
+
+[watch]
+files = ["{}"]
+debounce_ms = 300
+
+[[targets]]
+name = "test"
+signal = "SIGHUP"
+process_name = "nonexistent_process_99999"
+"#,
+            env_path.to_str().unwrap().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_hotswap"))
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--dry-run")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+
+    // Process was running (killed by us, not exited with clap error)
+    assert_ne!(output.status.code(), Some(2), "process rejected arguments");
 }

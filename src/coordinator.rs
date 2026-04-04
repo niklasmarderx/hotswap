@@ -215,7 +215,7 @@ pub fn resolve_targets_from_config(targets: &[TargetConfig]) -> Result<Vec<Targe
                         procs[0].pid
                     ));
                 }
-                let p = procs.into_iter().next().unwrap();
+                let p = procs.into_iter().next().expect("non-empty after check");
                 Output::process_found(&p.name, p.pid);
                 Some(p)
             }
@@ -527,9 +527,9 @@ pub fn reload(
         if let Some(ref cmd) = hooks.pre_reload {
             if !opts.dry_run {
                 if let Err(e) = hooks::run_hook("pre_reload", cmd, None) {
-                    Output::error(&format!("pre_reload hook failed: {}", e));
+                    Output::error(&format!("pre_reload hook failed, aborting reload: {}", e));
                     run_on_error_hook(opts.hooks);
-                    return Ok(());
+                    return Err(e);
                 }
             } else {
                 Output::info(&format!("would run pre_reload hook: {}", cmd));

@@ -206,12 +206,26 @@ mod tests {
         assert!(backend.health_check.is_some());
         assert_eq!(backend.health_timeout_ms, Some(5000));
 
+        // Per-target hooks and rollback
+        assert_eq!(backend.pre_signal.as_deref(), Some("echo draining"));
+        assert_eq!(backend.post_signal.as_deref(), Some("echo warmed"));
+        assert_eq!(backend.enable_rollback, Some(true));
+
         let frontend = &cfg.targets[1];
         assert_eq!(frontend.name, "frontend");
         assert_eq!(
             frontend.depends_on.as_deref(),
             Some(&["backend".to_string()][..])
         );
+        assert_eq!(frontend.pre_signal, None);
+        assert_eq!(frontend.post_signal, None);
+        assert_eq!(frontend.enable_rollback, None);
+
+        // Global hooks
+        let hooks = cfg.hooks.as_ref().expect("hooks section should exist");
+        assert_eq!(hooks.pre_reload.as_deref(), Some("echo pre"));
+        assert_eq!(hooks.post_reload.as_deref(), Some("echo post"));
+        assert_eq!(hooks.on_error.as_deref(), Some("echo error"));
     }
 
     #[test]
