@@ -13,9 +13,10 @@ if [ ! -d "$DEMO_DIR" ]; then
     exit 1
 fi
 
-# --- Change 1: Update env vars (triggers env diff with masking) ---
-sleep 3
+# Wait for hotswap to start and be ready
+sleep 6
 
+# --- Change 1: Update env vars (triggers env diff with masking) ---
 cat > "$DEMO_DIR/.env" << 'EOF'
 DATABASE_URL=postgres://prod-db:5432/myapp
 API_KEY=sk-live-abc123
@@ -25,17 +26,10 @@ REDIS_URL=redis://cache:6379
 NEW_FEATURE_FLAG=enabled
 EOF
 
-# --- Change 2: Break config.toml (triggers validation error) ---
-sleep 6
+# Wait for diff to display
+sleep 8
 
-cat > "$DEMO_DIR/config.toml" << 'EOF'
-[server
-port = 3000
-EOF
-
-# --- Change 3: Fix config.toml with new values (triggers config diff) ---
-sleep 5
-
+# --- Change 2: Update config.toml values (triggers config diff) ---
 cat > "$DEMO_DIR/config.toml" << 'EOF'
 [server]
 host = "0.0.0.0"

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebouncedEvent};
+use notify_debouncer_full::{new_debouncer, DebouncedEvent, RecommendedCache};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -20,10 +20,7 @@ pub enum WatchEvent {
 
 /// Handle that keeps the file watcher alive. Drop to stop watching.
 pub struct WatchHandle {
-    _debouncer: notify_debouncer_full::Debouncer<
-        notify::RecommendedWatcher,
-        notify_debouncer_full::FileIdMap,
-    >,
+    _debouncer: notify_debouncer_full::Debouncer<notify::RecommendedWatcher, RecommendedCache>,
 }
 
 /// Starts watching the given paths with debounce.

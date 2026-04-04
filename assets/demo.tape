@@ -4,39 +4,24 @@
 Output assets/demo.gif
 
 Set Shell "bash"
-Set FontSize 15
+Set FontSize 14
 Set Width 960
-Set Height 560
+Set Height 550
 Set Theme "Catppuccin Mocha"
 Set Padding 15
-Set TypingSpeed 35ms
+Set TypingSpeed 30ms
 Set CursorBlink false
 
-# === Setup (hidden — runs but not recorded) ===
+# === Setup (hidden) ===
 Hide
-Type "export DEMO_DIR=$(mktemp -d) && bash assets/demo-setup.sh $DEMO_DIR && cargo build --quiet 2>/dev/null"
-Enter
-Sleep 10s
-Type "clear"
-Enter
-Sleep 500ms
-Show
-
-# === Scene 1: hotswap init ===
-Sleep 500ms
-Type "hotswap init --output $DEMO_DIR/hotswap.toml"
-Enter
-Sleep 3s
-
-# === Scene 2: Start watching with validation ===
-Sleep 500ms
-Type "# Watch .env + config.toml — validate, diff, zero downtime"
+Type "export DEMO_DIR=/tmp/demo && rm -rf $DEMO_DIR && bash assets/demo-setup.sh $DEMO_DIR"
 Enter
 Sleep 1s
-
-# Start the background helper (hidden from recording)
-Hide
-Type "bash assets/demo-helper.sh $DEMO_DIR &"
+Type "export PATH=$(pwd)/target/release:$PATH"
+Enter
+Sleep 200ms
+# Start background helper early so its sleep aligns with the watcher start
+Type "bash assets/demo-helper.sh $DEMO_DIR >/dev/null 2>&1 &"
 Enter
 Sleep 200ms
 Type "clear"
@@ -44,22 +29,27 @@ Enter
 Sleep 500ms
 Show
 
+# === Scene 1: hotswap init ===
 Sleep 300ms
-Type "hotswap --watch $DEMO_DIR/.env --watch $DEMO_DIR/config.toml --validate toml --diff-only"
+Type "hotswap init --output $DEMO_DIR/hotswap.toml"
+Enter
+Sleep 4s
+
+# === Scene 2: Start watching ===
+Type "hotswap --watch $DEMO_DIR/.env --watch $DEMO_DIR/config.toml --validate toml --diff-only --quiet"
 Enter
 
-# === Scene 3: Env diff (helper modifies .env after ~3s) ===
-Sleep 7s
-
-# === Scene 4: Invalid TOML (helper breaks config.toml after ~6s) ===
+# Helper writes .env at t=6s from its start. It started ~2s ago during setup.
+# So .env change should arrive ~4s after this command.
+# === Scene 3: Env diff ===
 Sleep 8s
 
-# === Scene 5: Config diff (helper fixes config.toml after ~5s) ===
-Sleep 7s
+# === Scene 4: Config diff (helper writes config.toml 8s after .env change) ===
+Sleep 10s
 
 # === Exit ===
 Ctrl+C
-Sleep 1s
+Sleep 800ms
 
 Type "# Zero downtime. Zero drama."
 Enter
