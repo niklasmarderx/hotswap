@@ -18,7 +18,9 @@ impl SignalType {
 
 /// Send a signal to a process by PID.
 pub fn send_signal(pid: u32, signal_type: &SignalType) -> Result<()> {
-    let nix_pid = Pid::from_raw(pid as i32);
+    let raw_pid =
+        i32::try_from(pid).map_err(|_| anyhow::anyhow!("PID {} exceeds maximum value", pid))?;
+    let nix_pid = Pid::from_raw(raw_pid);
     let nix_signal = signal_type.to_nix_signal();
 
     signal::kill(nix_pid, nix_signal).map_err(|e| {

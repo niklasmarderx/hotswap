@@ -2,13 +2,15 @@
 name = "hotswap"
 version = "0.1.0"
 edition = "2021"
-description = "Zero-downtime config & env reloader — watch files, validate, and signal processes"
+rust-version = "1.74"
+description = "Zero-downtime config & env reloader — watch files, validate, diff, and signal processes"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/niklasmarderx/hotswap"
+homepage = "https://github.com/niklasmarderx/hotswap"
 readme = "README.md"
-keywords = ["config", "reload", "watch", "env", "signal"]
+keywords = ["reload", "watch", "signal", "config", "env"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = [".github/**", "tests/**", "assets/**", "examples/**"]
+exclude = [".github/**", "assets/**"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }

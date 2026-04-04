@@ -21,7 +21,7 @@ impl EnvDiff {
         self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
     }
 
-    #[allow(dead_code)] // Used by output/logging
+    #[cfg(test)]
     pub fn total_changes(&self) -> usize {
         self.added.len() + self.changed.len() + self.removed.len()
     }

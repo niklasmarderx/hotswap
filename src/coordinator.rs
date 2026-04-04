@@ -207,6 +207,14 @@ pub fn resolve_targets_from_config(targets: &[TargetConfig]) -> Result<Vec<Targe
                 Output::process_not_found(proc_name);
                 None
             } else {
+                if procs.len() > 1 {
+                    Output::warn(&format!(
+                        "found {} processes named '{}', using pid {}",
+                        procs.len(),
+                        proc_name,
+                        procs[0].pid
+                    ));
+                }
                 let p = procs.into_iter().next().unwrap();
                 Output::process_found(&p.name, p.pid);
                 Some(p)
@@ -544,10 +552,13 @@ pub fn reload(
                     Output::rollback_ok();
                     // Re-signal targets with restored config
                     Output::info("re-signaling with restored config");
-                    let _ = match opts.strategy {
+                    match match opts.strategy {
                         ReloadStrategy::Sequential => reload_sequential(opts.targets, opts.dry_run),
                         ReloadStrategy::Parallel => reload_parallel(opts.targets, opts.dry_run),
-                    };
+                    } {
+                        Ok(()) => Output::info("recovery successful"),
+                        Err(re) => Output::error(&format!("re-signaling failed: {}", re)),
+                    }
                 }
                 Err(re) => {
                     Output::rollback_failed(&re.to_string());
@@ -598,7 +609,7 @@ fn reload_sequential(targets: &mut [Target], dry_run: bool) -> Result<()> {
                 "stopping sequential reload at '{}': {}",
                 target.name, e
             ));
-            return Ok(());
+            return Err(e);
         }
     }
 
@@ -641,7 +652,7 @@ fn reload_parallel(targets: &mut [Target], dry_run: bool) -> Result<()> {
                     "stopping parallel reload at '{}': {}",
                     targets[layer[0]].name, e
                 ));
-                return Ok(());
+                return Err(e);
             }
         } else {
             // Multiple targets in layer — signal concurrently
@@ -672,8 +683,7 @@ fn reload_parallel(targets: &mut [Target], dry_run: bool) -> Result<()> {
                 for err in &errors {
                     Output::error(err);
                 }
-                Output::error("stopping parallel reload due to errors in current layer");
-                return Ok(());
+                anyhow::bail!("parallel reload failed: {}", errors.join("; "));
             }
         }
     }
@@ -720,7 +730,7 @@ mod tests {
         std::fs::write(&env_path, "KEY=value\n").unwrap();
 
         let path_str = env_path.to_string_lossy().to_string();
-        let mut state = DiffState::new(&[path_str.clone()]);
+        let mut state = DiffState::new(std::slice::from_ref(&path_str));
 
         // No change yet
         assert!(state.update_and_diff_env(&path_str).is_none());

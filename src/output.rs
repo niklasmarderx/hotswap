@@ -20,7 +20,10 @@ fn json_event(event_type: &str, data: serde_json::Value) {
         "data": data,
         "timestamp": chrono::Utc::now().to_rfc3339()
     });
-    println!("{}", serde_json::to_string(&event).unwrap());
+    match serde_json::to_string(&event) {
+        Ok(s) => println!("{}", s),
+        Err(e) => eprintln!("failed to serialize JSON event: {}", e),
+    }
 }
 
 /// Styles for terminal output.

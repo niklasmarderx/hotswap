@@ -59,3 +59,12 @@ jobs:
           files: |
             hotswap-*.tar.gz
             hotswap-*.tar.gz.sha256
+
+  publish:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -133,7 +133,7 @@ fn main() -> Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("hotswap=info".parse().unwrap()),
+                .add_directive("hotswap=info".parse().expect("valid log directive")),
         )
         .with_target(false)
         .without_time();

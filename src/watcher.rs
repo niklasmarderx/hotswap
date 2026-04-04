@@ -130,7 +130,13 @@ fn is_glob_pattern(s: &str) -> bool {
 fn compile_ignore_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
     patterns
         .iter()
-        .filter_map(|p| glob::Pattern::new(p).ok())
+        .filter_map(|p| match glob::Pattern::new(p) {
+            Ok(pattern) => Some(pattern),
+            Err(e) => {
+                Output::warn(&format!("invalid ignore pattern '{}': {}", p, e));
+                None
+            }
+        })
         .collect()
 }
 
