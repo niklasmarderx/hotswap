@@ -1,0 +1,46 @@
+# hotswap.toml — Example configuration
+#
+# Run with: hotswap --config hotswap.toml
+#
+# This config watches .env and config files, validates configs before
+# reloading, and signals processes in dependency order with health checks.
+
+# Reload strategy: "sequential" (default) or "parallel"
+# Sequential: reload one target at a time in dependency order
+# Parallel: reload independent targets concurrently, respecting dependency layers
+strategy = "sequential"
+
+[watch]
+# Files and directories to watch (supports globs)
+files = [".env", "config/*.toml", "config/*.yaml"]
+
+# Patterns to ignore (in addition to built-in: .git, node_modules, target)
+ignore = ["*.tmp", "*.bak"]
+
+# Debounce interval in milliseconds (default: 500)
+debounce_ms = 500
+
+# Target: API server (reloaded first)
+[[targets]]
+name = "api-server"
+signal = "SIGHUP"
+pid_file = "/tmp/api-server.pid"
+validate = "toml"
+health_check = "curl -sf http://localhost:3000/health"
+health_timeout_ms = 5000
+
+# Target: Worker (depends on api-server, reloaded second)
+[[targets]]
+name = "worker"
+signal = "SIGUSR1"
+process_name = "worker"
+depends_on = ["api-server"]
+health_check = "curl -sf http://localhost:3001/health"
+health_timeout_ms = 3000
+
+# Target: Frontend (depends on api-server, can reload in parallel with worker)
+[[targets]]
+name = "frontend"
+signal = "SIGUSR2"
+process_name = "node"
+depends_on = ["api-server"]

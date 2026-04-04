@@ -47,17 +47,57 @@ pub fn read_pid_file(path: &str) -> Result<ProcessInfo> {
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
     let sysinfo_pid = sysinfo::Pid::from_u32(pid);
-    let name = sys
-        .process(sysinfo_pid)
-        .map(|p| p.name().to_string_lossy().into_owned())
-        .unwrap_or_else(|| format!("pid:{pid}"));
-
-    Ok(ProcessInfo { pid, name })
+    match sys.process(sysinfo_pid) {
+        Some(p) => Ok(ProcessInfo {
+            pid,
+            name: p.name().to_string_lossy().into_owned(),
+        }),
+        None => bail!(
+            "process with PID {} (from {}) is not running",
+            pid,
+            path.display()
+        ),
+    }
 }
 
-/// Check if a process with the given PID is alive.
-pub fn is_alive(pid: u32) -> bool {
-    let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_valid_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("test.pid");
+        let current_pid = std::process::id();
+        std::fs::write(&pid_path, current_pid.to_string()).unwrap();
+
+        let info = read_pid_file(pid_path.to_str().unwrap()).unwrap();
+        assert_eq!(info.pid, current_pid);
+    }
+
+    #[test]
+    fn read_missing_pid_file() {
+        assert!(read_pid_file("/nonexistent/test.pid").is_err());
+    }
+
+    #[test]
+    fn read_non_numeric_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("bad.pid");
+        let mut f = std::fs::File::create(&pid_path).unwrap();
+        f.write_all(b"not-a-number").unwrap();
+
+        assert!(read_pid_file(pid_path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn read_pid_file_dead_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("dead.pid");
+        std::fs::write(&pid_path, "4294967").unwrap();
+        let result = read_pid_file(pid_path.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not running"));
+    }
 }

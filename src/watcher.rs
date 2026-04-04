@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::output::Output;
+
 /// Events produced by the file watcher.
 #[derive(Debug)]
 pub enum WatchEvent {
@@ -12,15 +14,29 @@ pub enum WatchEvent {
     FilesChanged(Vec<PathBuf>),
     /// An error occurred in the watcher.
     Error(String),
+    /// Shutdown requested (e.g. Ctrl+C).
+    Shutdown,
+}
+
+/// Handle that keeps the file watcher alive. Drop to stop watching.
+pub struct WatchHandle {
+    _debouncer: notify_debouncer_full::Debouncer<
+        notify::RecommendedWatcher,
+        notify_debouncer_full::FileIdMap,
+    >,
 }
 
 /// Starts watching the given paths with debounce.
-/// Returns a receiver that yields WatchEvents.
+/// Returns (receiver, sender, handle). The sender can be used to inject events (e.g. Shutdown).
 pub fn start_watching(
     paths: &[String],
     debounce_ms: u64,
     ignore_patterns: &[String],
-) -> Result<mpsc::Receiver<WatchEvent>> {
+) -> Result<(
+    mpsc::Receiver<WatchEvent>,
+    mpsc::Sender<WatchEvent>,
+    WatchHandle,
+)> {
     let (tx, rx) = mpsc::channel();
     let ignore_globs = compile_ignore_patterns(ignore_patterns);
 
@@ -55,6 +71,10 @@ pub fn start_watching(
             .unwrap_or_default();
 
         if matched.is_empty() {
+            if is_glob_pattern(path_str) {
+                Output::warn(&format!("glob '{}' matched no files", path_str));
+                continue;
+            }
             // Not a glob — watch as a literal path
             let path = Path::new(path_str);
             let mode = if path.is_dir() {
@@ -84,14 +104,11 @@ pub fn start_watching(
         }
     }
 
-    // Keep the debouncer alive by moving it into a background thread
-    std::thread::spawn(move || {
-        let _debouncer = debouncer;
-        // Block forever to keep the debouncer alive
-        std::thread::park();
-    });
+    let handle = WatchHandle {
+        _debouncer: debouncer,
+    };
 
-    Ok(rx)
+    Ok((rx, tx, handle))
 }
 
 /// Default ignore patterns.
@@ -104,6 +121,10 @@ pub fn default_ignore_patterns() -> Vec<String> {
         "*.swo".to_string(),
         "*~".to_string(),
     ]
+}
+
+fn is_glob_pattern(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
 }
 
 fn compile_ignore_patterns(patterns: &[String]) -> Vec<glob::Pattern> {

@@ -1,0 +1,7 @@
+[server]
+host = "localhost"
+port = 3000
+
+[database]
+url = "postgres://localhost:5432/myapp"
+max_connections = 10

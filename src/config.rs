@@ -37,7 +37,6 @@ impl std::fmt::Display for SignalType {
 }
 
 /// Reload strategy for multi-process coordination.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReloadStrategy {
@@ -82,6 +81,7 @@ pub struct WatchConfig {
 pub struct HotswapConfig {
     pub watch: WatchConfig,
     pub targets: Vec<TargetConfig>,
+    pub strategy: Option<ReloadStrategy>,
 }
 
 impl HotswapConfig {
@@ -89,5 +89,127 @@ impl HotswapConfig {
         let content = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&content)?;
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_type_from_str_full_names() {
+        assert_eq!(
+            SignalType::from_str_loose("SIGHUP"),
+            Some(SignalType::Sighup)
+        );
+        assert_eq!(
+            SignalType::from_str_loose("SIGUSR1"),
+            Some(SignalType::Sigusr1)
+        );
+        assert_eq!(
+            SignalType::from_str_loose("SIGUSR2"),
+            Some(SignalType::Sigusr2)
+        );
+        assert_eq!(
+            SignalType::from_str_loose("SIGTERM"),
+            Some(SignalType::Sigterm)
+        );
+    }
+
+    #[test]
+    fn signal_type_from_str_short_names() {
+        assert_eq!(SignalType::from_str_loose("HUP"), Some(SignalType::Sighup));
+        assert_eq!(
+            SignalType::from_str_loose("USR1"),
+            Some(SignalType::Sigusr1)
+        );
+        assert_eq!(
+            SignalType::from_str_loose("USR2"),
+            Some(SignalType::Sigusr2)
+        );
+        assert_eq!(
+            SignalType::from_str_loose("TERM"),
+            Some(SignalType::Sigterm)
+        );
+    }
+
+    #[test]
+    fn signal_type_case_insensitive() {
+        assert_eq!(
+            SignalType::from_str_loose("sighup"),
+            Some(SignalType::Sighup)
+        );
+        assert_eq!(
+            SignalType::from_str_loose("Sigusr1"),
+            Some(SignalType::Sigusr1)
+        );
+    }
+
+    #[test]
+    fn signal_type_invalid() {
+        assert!(SignalType::from_str_loose("SIGKILL").is_none());
+        assert!(SignalType::from_str_loose("invalid").is_none());
+        assert!(SignalType::from_str_loose("").is_none());
+    }
+
+    #[test]
+    fn signal_type_display() {
+        assert_eq!(SignalType::Sighup.to_string(), "SIGHUP");
+        assert_eq!(SignalType::Sigterm.name(), "SIGTERM");
+    }
+
+    #[test]
+    fn reload_strategy_from_str() {
+        assert!(matches!(
+            ReloadStrategy::from_str_loose("sequential"),
+            Some(ReloadStrategy::Sequential)
+        ));
+        assert!(matches!(
+            ReloadStrategy::from_str_loose("seq"),
+            Some(ReloadStrategy::Sequential)
+        ));
+        assert!(matches!(
+            ReloadStrategy::from_str_loose("parallel"),
+            Some(ReloadStrategy::Parallel)
+        ));
+        assert!(matches!(
+            ReloadStrategy::from_str_loose("par"),
+            Some(ReloadStrategy::Parallel)
+        ));
+        assert!(ReloadStrategy::from_str_loose("invalid").is_none());
+    }
+
+    #[test]
+    fn parse_hotswap_config() {
+        let cfg = HotswapConfig::from_file("tests/fixtures/hotswap.toml").unwrap();
+        assert_eq!(cfg.watch.files, vec![".env", "config.toml"]);
+        assert_eq!(cfg.watch.debounce_ms, Some(300));
+        assert_eq!(cfg.targets.len(), 2);
+
+        let backend = &cfg.targets[0];
+        assert_eq!(backend.name, "backend");
+        assert_eq!(backend.signal.as_deref(), Some("SIGHUP"));
+        assert_eq!(backend.pid_file.as_deref(), Some("/tmp/backend.pid"));
+        assert_eq!(backend.validate.as_deref(), Some("toml"));
+        assert!(backend.health_check.is_some());
+        assert_eq!(backend.health_timeout_ms, Some(5000));
+
+        let frontend = &cfg.targets[1];
+        assert_eq!(frontend.name, "frontend");
+        assert_eq!(
+            frontend.depends_on.as_deref(),
+            Some(&["backend".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn parse_config_with_strategy() {
+        let cfg = HotswapConfig::from_file("tests/fixtures/hotswap.toml").unwrap();
+        assert!(matches!(cfg.strategy, Some(ReloadStrategy::Sequential)));
+    }
+
+    #[test]
+    fn parse_missing_config_returns_error() {
+        assert!(HotswapConfig::from_file("/nonexistent/hotswap.toml").is_err());
     }
 }

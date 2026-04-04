@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod config;
 mod coordinator;
 mod env;
@@ -10,10 +8,12 @@ mod validate;
 mod watcher;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::Shell;
 
-use config::SignalType;
+use config::{ReloadStrategy, SignalType};
 use coordinator::{EnvState, ReloadOptions};
+use env::is_env_file;
 use output::Output;
 use validate::Validator;
 use watcher::WatchEvent;
@@ -26,7 +26,7 @@ use watcher::WatchEvent;
 #[command(name = "hotswap", version, about, long_about = None)]
 struct Cli {
     /// Files or directories to watch (supports globs)
-    #[arg(short, long = "watch", required_unless_present = "config")]
+    #[arg(short, long = "watch", required_unless_present_any = ["config", "completions"])]
     watch_paths: Vec<String>,
 
     /// Process names to signal on change
@@ -34,7 +34,11 @@ struct Cli {
     signal_targets: Vec<String>,
 
     /// Signal type to send [default: SIGHUP]
-    #[arg(long = "signal-type", default_value = "SIGHUP")]
+    #[arg(
+        long = "signal-type",
+        default_value = "SIGHUP",
+        hide_default_value = true
+    )]
     signal_type: String,
 
     /// PID file to read process ID from
@@ -42,7 +46,7 @@ struct Cli {
     pid_file: Option<String>,
 
     /// Validators to run before signaling (toml, json, yaml, or shell command)
-    #[arg(short = 'V', long = "validate")]
+    #[arg(long = "validate")]
     validators: Vec<String>,
 
     /// Debounce interval in milliseconds
@@ -68,26 +72,53 @@ struct Cli {
     /// Suppress banner output
     #[arg(short, long)]
     quiet: bool,
+
+    /// Reload strategy: sequential or parallel
+    #[arg(long, default_value = "sequential")]
+    strategy: String,
+
+    /// Output as JSON (structured logging)
+    #[arg(long)]
+    json: bool,
+
+    /// Generate shell completions and exit
+    #[arg(long, value_enum)]
+    completions: Option<Shell>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Handle completions generation
+    if let Some(shell) = cli.completions {
+        let mut cmd = Cli::command();
+        clap_complete::generate(shell, &mut cmd, "hotswap", &mut std::io::stdout());
+        return Ok(());
+    }
+
     // Set up tracing
-    tracing_subscriber::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("hotswap=info".parse().unwrap()),
         )
         .with_target(false)
-        .without_time()
-        .init();
+        .without_time();
 
-    if !cli.quiet {
+    if cli.json {
+        subscriber.json().init();
+    } else {
+        subscriber.init();
+    }
+
+    // Set JSON output mode globally
+    output::set_json_mode(cli.json);
+
+    if !cli.quiet && !cli.json {
         Output::banner();
     }
 
-    // Parse signal type
+    // Parse signal type (used as default for CLI-based targets)
     let signal_type = SignalType::from_str_loose(&cli.signal_type).unwrap_or_else(|| {
         Output::error(&format!(
             "unknown signal type: {} (using SIGHUP)",
@@ -96,13 +127,53 @@ fn main() -> Result<()> {
         SignalType::Sighup
     });
 
-    // Determine watch paths
-    let watch_paths = if let Some(ref config_path) = cli.config {
-        let cfg = config::HotswapConfig::from_file(config_path)?;
-        cfg.watch.files
-    } else {
-        cli.watch_paths.clone()
-    };
+    // Parse strategy
+    let strategy = ReloadStrategy::from_str_loose(&cli.strategy).unwrap_or_else(|| {
+        Output::error(&format!(
+            "unknown strategy: {} (using sequential)",
+            cli.strategy
+        ));
+        ReloadStrategy::Sequential
+    });
+
+    // Load config file or use CLI args
+    let (watch_paths, ignore_extra, debounce, mut targets, validators, resolved_strategy) =
+        if let Some(ref config_path) = cli.config {
+            let cfg = config::HotswapConfig::from_file(config_path)?;
+
+            let watch = cfg.watch.files;
+            let ignore = cfg.watch.ignore.unwrap_or_default();
+            let debounce = cfg.watch.debounce_ms.unwrap_or(cli.debounce);
+            let targets = coordinator::resolve_targets_from_config(&cfg.targets)?;
+            let strat = cfg.strategy.unwrap_or(strategy);
+
+            (watch, ignore, debounce, targets, Vec::new(), strat)
+        } else {
+            let targets = if cli.diff_only {
+                Vec::new()
+            } else {
+                coordinator::resolve_targets(
+                    &cli.signal_targets,
+                    &signal_type,
+                    cli.pid_file.as_deref(),
+                )
+            };
+
+            let validators: Vec<(String, Validator)> = cli
+                .validators
+                .iter()
+                .map(|v| (v.clone(), Validator::parse(v)))
+                .collect();
+
+            (
+                cli.watch_paths.clone(),
+                cli.ignore.clone(),
+                cli.debounce,
+                targets,
+                validators,
+                strategy,
+            )
+        };
 
     if watch_paths.is_empty() {
         anyhow::bail!("no files to watch — specify --watch or --config");
@@ -110,7 +181,7 @@ fn main() -> Result<()> {
 
     // Build ignore patterns
     let mut ignore = watcher::default_ignore_patterns();
-    ignore.extend(cli.ignore.iter().cloned());
+    ignore.extend(ignore_extra);
 
     // Display what we're watching
     Output::watching(&watch_paths);
@@ -122,28 +193,18 @@ fn main() -> Result<()> {
         .cloned()
         .collect();
 
-    // Build validators
-    let validators: Vec<(String, Validator)> = cli
-        .validators
-        .iter()
-        .map(|v| {
-            let validator = Validator::parse(v);
-            (v.clone(), validator)
-        })
-        .collect();
-
-    // Resolve targets
-    if cli.diff_only {
-        // No targets needed
-    } else {
-        coordinator::resolve_targets(&cli.signal_targets, &signal_type, cli.pid_file.as_deref());
-    };
-
     // Initialize env state
     let mut env_state = EnvState::new(&env_files);
 
     // Start watching
-    let rx = watcher::start_watching(&watch_paths, cli.debounce, &ignore)?;
+    let (rx, shutdown_tx, _watcher) = watcher::start_watching(&watch_paths, debounce, &ignore)?;
+
+    // Set up Ctrl+C handler
+    let ctrlc_tx = shutdown_tx.clone();
+    ctrlc::set_handler(move || {
+        let _ = ctrlc_tx.send(WatchEvent::Shutdown);
+    })?;
+
     Output::waiting();
 
     // Main event loop
@@ -159,19 +220,15 @@ fn main() -> Result<()> {
                     Output::file_changed(path);
                 }
 
-                let opts = ReloadOptions {
-                    targets: coordinator::resolve_targets(
-                        &cli.signal_targets,
-                        &signal_type,
-                        cli.pid_file.as_deref(),
-                    ),
-                    validators: validators.clone(),
+                let mut opts = ReloadOptions {
+                    targets: &mut targets,
+                    validators: &validators,
                     dry_run: cli.dry_run,
                     diff_only: cli.diff_only,
-                    env_files: env_files.clone(),
+                    strategy: &resolved_strategy,
                 };
 
-                if let Err(e) = coordinator::reload(&opts, &mut env_state, &changed) {
+                if let Err(e) = coordinator::reload(&mut opts, &mut env_state, &changed) {
                     Output::error(&e.to_string());
                 }
 
@@ -179,6 +236,10 @@ fn main() -> Result<()> {
             }
             Ok(WatchEvent::Error(e)) => {
                 Output::error(&e);
+            }
+            Ok(WatchEvent::Shutdown) => {
+                Output::info("shutting down");
+                break;
             }
             Err(_) => {
                 Output::error("watcher channel closed");
@@ -188,12 +249,4 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn is_env_file(path: &str) -> bool {
-    let filename = std::path::Path::new(path)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("");
-    filename.starts_with(".env") || filename.ends_with(".env")
 }

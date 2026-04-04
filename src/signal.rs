@@ -33,25 +33,13 @@ pub fn send_signal(pid: u32, signal_type: &SignalType) -> Result<()> {
     Ok(())
 }
 
-/// Send a signal to a process group (negative PID).
-pub fn send_signal_to_group(pgid: u32, signal_type: &SignalType) -> Result<()> {
-    let nix_pid = Pid::from_raw(-(pgid as i32));
-    let nix_signal = signal_type.to_nix_signal();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    signal::kill(nix_pid, nix_signal).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to send {} to process group {}: {}",
-            signal_type.name(),
-            pgid,
-            e
-        )
-    })?;
-
-    Ok(())
-}
-
-/// Verify we can signal a process (send signal 0).
-pub fn can_signal(pid: u32) -> bool {
-    let nix_pid = Pid::from_raw(pid as i32);
-    signal::kill(nix_pid, None).is_ok()
+    #[test]
+    fn send_signal_to_nonexistent_process() {
+        let result = send_signal(4_294_967, &SignalType::Sighup);
+        assert!(result.is_err());
+    }
 }

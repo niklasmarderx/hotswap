@@ -8,6 +8,7 @@ repository = "https://github.com/niklasmarderx/hotswap"
 readme = "README.md"
 keywords = ["config", "reload", "watch", "env", "signal"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [".github/**", "tests/**", "assets/**", "examples/**"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -18,12 +19,16 @@ dotenvy = "0.15"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yml = "0.0.12"
 colored = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tokio = { version = "1", features = ["full"] }
 glob = "0.3"
 sysinfo = "0.33"
 anyhow = "1"
 chrono = "0.4"
+clap_complete = "4"
+ctrlc = "3"
+
+[dev-dependencies]
+tempfile = "3"

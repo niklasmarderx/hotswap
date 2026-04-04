@@ -1,0 +1,20 @@
+strategy = "sequential"
+
+[watch]
+files = [".env", "config.toml"]
+ignore = ["*.tmp"]
+debounce_ms = 300
+
+[[targets]]
+name = "backend"
+signal = "SIGHUP"
+pid_file = "/tmp/backend.pid"
+validate = "toml"
+health_check = "curl -sf http://localhost:3000/health"
+health_timeout_ms = 5000
+
+[[targets]]
+name = "frontend"
+signal = "SIGUSR1"
+process_name = "node"
+depends_on = ["backend"]
