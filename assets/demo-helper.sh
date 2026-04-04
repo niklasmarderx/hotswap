@@ -13,20 +13,9 @@ if [ ! -d "$DEMO_DIR" ]; then
     exit 1
 fi
 
+# --- Change 1: Update env vars (triggers env diff with masking) ---
 sleep 3
 
-# Change 1: Update DATABASE_URL
-cat > "$DEMO_DIR/.env" << 'EOF'
-DATABASE_URL=postgres://prod-db:5432/myapp
-API_KEY=sk-live-abc123
-PORT=3000
-DEBUG=false
-REDIS_URL=redis://cache:6379
-EOF
-
-sleep 5
-
-# Change 2: Modify PORT and add a new variable
 cat > "$DEMO_DIR/.env" << 'EOF'
 DATABASE_URL=postgres://prod-db:5432/myapp
 API_KEY=sk-live-abc123
@@ -36,20 +25,21 @@ REDIS_URL=redis://cache:6379
 NEW_FEATURE_FLAG=enabled
 EOF
 
-sleep 5
+# --- Change 2: Break config.toml (triggers validation error) ---
+sleep 6
 
-# Change 3: Write invalid TOML (to show validation catching errors)
 cat > "$DEMO_DIR/config.toml" << 'EOF'
 [server
 port = 3000
 EOF
 
-sleep 4
+# --- Change 3: Fix config.toml with new values (triggers config diff) ---
+sleep 5
 
-# Change 4: Fix the TOML (to show config diff)
 cat > "$DEMO_DIR/config.toml" << 'EOF'
 [server]
 host = "0.0.0.0"
-port = 3000
+port = 8080
+workers = 8
 max_connections = 200
 EOF

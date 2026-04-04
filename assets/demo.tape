@@ -1,78 +1,66 @@
-# hotswap — Professional Demo
+# hotswap — Demo
 # Record with: vhs assets/demo.tape
 
 Output assets/demo.gif
 
 Set Shell "bash"
 Set FontSize 15
-Set Width 950
-Set Height 550
+Set Width 960
+Set Height 560
 Set Theme "Catppuccin Mocha"
 Set Padding 15
 Set TypingSpeed 35ms
 Set CursorBlink false
 
-# --- Setup (hidden from viewer via speed) ---
+# === Setup (hidden — runs but not recorded) ===
 Hide
-Type "export DEMO_DIR=$(mktemp -d) && cp /dev/null $DEMO_DIR/.env && cp /dev/null $DEMO_DIR/config.toml"
+Type "export DEMO_DIR=$(mktemp -d) && bash assets/demo-setup.sh $DEMO_DIR && cargo build --quiet 2>/dev/null"
 Enter
-Sleep 200ms
-Type `cat > $DEMO_DIR/.env << 'EOF'
-DATABASE_URL=postgres://localhost:5432/myapp
-API_KEY=sk-test-1234567890
-PORT=3000
-DEBUG=true
-REDIS_URL=redis://localhost:6379
-EOF`
+Sleep 10s
+Type "clear"
 Enter
-Sleep 200ms
-Type `cat > $DEMO_DIR/config.toml << 'EOF'
-[server]
-host = "localhost"
-port = 3000
-max_connections = 100
-EOF`
-Enter
-Sleep 200ms
+Sleep 500ms
 Show
 
-# --- Scene 1: Show current env ---
-Type "cat $DEMO_DIR/.env"
+# === Scene 1: hotswap init ===
+Sleep 500ms
+Type "hotswap init --output $DEMO_DIR/hotswap.toml"
 Enter
-Sleep 2s
+Sleep 3s
 
-# --- Scene 2: Start hotswap with diff-only ---
-Type "# Watch .env and config.toml — validate TOML, show diffs"
+# === Scene 2: Start watching with validation ===
+Sleep 500ms
+Type "# Watch .env + config.toml — validate, diff, zero downtime"
 Enter
-Sleep 800ms
+Sleep 1s
 
-# Start the helper script in background
+# Start the background helper (hidden from recording)
 Hide
 Type "bash assets/demo-helper.sh $DEMO_DIR &"
 Enter
 Sleep 200ms
+Type "clear"
+Enter
+Sleep 500ms
 Show
 
-Type "hotswap --watch $DEMO_DIR/.env --watch $DEMO_DIR/config.toml --validate toml --diff-only --quiet"
+Sleep 300ms
+Type "hotswap --watch $DEMO_DIR/.env --watch $DEMO_DIR/config.toml --validate toml --diff-only"
 Enter
 
-# --- Wait for changes to happen ---
-# Change 1: DATABASE_URL update (~3s)
-Sleep 5s
+# === Scene 3: Env diff (helper modifies .env after ~3s) ===
+Sleep 7s
 
-# Change 2: PORT change + NEW_FEATURE_FLAG added (~5s)
-Sleep 6s
+# === Scene 4: Invalid TOML (helper breaks config.toml after ~6s) ===
+Sleep 8s
 
-# Change 3: Invalid TOML (~5s) — validation error shown
-Sleep 5s
+# === Scene 5: Config diff (helper fixes config.toml after ~5s) ===
+Sleep 7s
 
-# Change 4: Fixed TOML (~4s) — validation passes
-Sleep 5s
-
-# --- Exit ---
+# === Exit ===
 Ctrl+C
-Sleep 500ms
+Sleep 1s
 
-Type "# Zero downtime. Zero drama. github.com/niklasmarderx/hotswap"
+Type "# Zero downtime. Zero drama."
 Enter
 Sleep 3s
