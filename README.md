@@ -219,8 +219,8 @@ Options:
        │
        ▼
   ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌─────────┐
-  │  Watch   │────▶│ Validate │────▶│   Diff   │────▶│  Signal │
-  │ (notify) │     │ (syntax) │     │  (.env)  │     │ (kill)  │
+  │  Watch  │────▶│ Validate │────▶│   Diff   │────▶│  Signal │
+  │ (notify)│     │ (syntax) │     │  (.env)  │     │ (kill)  │
   └─────────┘     └──────────┘     └──────────┘     └─────────┘
                        │                                  │
                   Invalid?                           Health check
