@@ -16,7 +16,7 @@ exclude = [".github/**", "assets/**"]
 clap = { version = "4", features = ["derive", "env"] }
 notify = "8"
 notify-debouncer-full = "0.5"
-nix = { version = "0.29", features = ["signal", "process"] }
+nix = { version = "0.31", features = ["signal", "process"] }
 dotenvy = "0.15"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
