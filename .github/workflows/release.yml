@@ -36,7 +36,7 @@ jobs:
           tar czf ../../../hotswap-${{ matrix.target }}.tar.gz hotswap
           cd ../../..
           shasum -a 256 hotswap-${{ matrix.target }}.tar.gz > hotswap-${{ matrix.target }}.tar.gz.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hotswap-${{ matrix.target }}
           path: |
